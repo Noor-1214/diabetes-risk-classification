@@ -1,0 +1,425 @@
+</> YAML
+title: "Diabetes Risk Classification and Exploratory Data Analysis"
+author: "Noor ul Huda"
+date: "2025"
+output: html_document
+
+```{r}
+library(ggplot2)
+library(tidyverse)     
+library(data.table) 
+library(dplyr)
+library(lmtest)
+library(stringr)
+library(magrittr)
+library(randomForest)
+library(caret)
+library(MLmetrics)
+library(smotefamily)
+library(parallel)
+library(pROC) 
+set.seed(123)
+
+```
+
+
+
+```{r}
+data <- read.csv("diabetes_dataset_with_notes.csv", header = TRUE, stringsAsFactors = FALSE)
+View(data)
+```
+
+
+```{r}
+summary(data)
+head(data)
+str(data)
+```
+
+```{r}
+colSums(is.na(data))
+```
+
+```{r}
+# Check for duplicate rows
+sum(duplicated(data))
+```
+
+```{r}
+# Remove duplicate rows
+data_new <- unique(data)
+```
+
+
+```{r}
+sum(duplicated(data_new))
+```
+
+
+
+```{r}
+table(data$gender)
+table(data$location)
+table(data$age)
+table(data$smoking_history)
+table(data$diabetes)
+```
+
+```{r}
+data_new <- data.table(data_new)
+```
+
+
+```{r}
+data_new[smoking_history %in% c("ever", "not current"), smoking_history := "former"]
+```
+
+```{r}
+
+# Remove rows where Age < 18 OR Gender is "Unknown"
+data_new <- data_new %>% filter(!(age < 7 & (smoking_history == "former" | smoking_history == "current" )))
+
+```
+
+```{r}
+
+# Check if any rows still have age < 7 and smoking_history as "former" or "current"
+filtered_rows <- data_new %>% filter(age < 7 & (smoking_history == "former" | smoking_history == "current"))
+print(filtered_rows)  # Should return 0 rows
+# filtered rows (dataframe) is to make sure there are no duplicates
+```
+
+```{r}
+# Check the data types of each column
+sapply(data_new, class)
+
+#convert column diabetes from binary to categorical 
+data_new <- data_new %>%
+  mutate(diabetes = factor(diabetes, levels = c(0, 1), labels = c("Non-Diabetic", "Diabetic")))
+#delete column
+# Remove column by name
+data_new <- select(data_new, -clinical_notes)
+```
+
+#EDA
+```{r}
+ggplot(data = data_new, aes(x=diabetes, y=hbA1c_level)) + geom_boxplot() + theme_classic() + ggtitle("hbA1c vs Diabetes")
+
+ggplot(data = data_new, aes(x=diabetes, y=blood_glucose_level)) + geom_boxplot() + theme_classic() + ggtitle("blood glucose vs Diabetes")
+
+ggplot(data = data_new, aes(x=gender, y=hbA1c_level)) + geom_boxplot() + theme_classic() + ggtitle("hbA1c vs gender")
+
+ggplot(data = data_new, aes(x=gender, y=bmi)) + geom_boxplot() + theme_classic() + ggtitle("bmi vs gender")
+
+ggplot(data = data_new, aes(x=diabetes, y=bmi)) + geom_boxplot() + theme_classic() + ggtitle("bmi vs diabetes")
+```
+
+```{r}
+# average blood glucose for each hbA1c level
+summary_data <- data_new %>%
+  group_by(diabetes) %>%
+  summarise(avg_glucose = mean(blood_glucose_level, na.rm = TRUE))
+
+# Create bar plot
+ggplot(summary_data, aes(x = as.factor(diabetes), y = avg_glucose)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Average Blood Glucose by Diabetes",
+       x = "Diabetes",
+       y = "Average Blood Glucose") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# average BMI by each HbA1c level
+summary_data <- data_new %>%
+  group_by(diabetes) %>%
+  summarise(avg_bmi = mean(bmi, na.rm = TRUE))
+
+# Create the bar plot
+ggplot(summary_data, aes(x = as.factor(diabetes), y = avg_bmi)) +
+  geom_col(fill = "darkgreen") +
+  labs(title = "Average BMI by Diabetes",
+       x = "Diabetes",
+       y = "Average BMI") +
+  theme_minimal()
+```
+```{r}
+
+summary_data <- data_new %>%
+  group_by(diabetes) %>%
+  summarise(avg_hypertension = mean(hypertension, na.rm = TRUE))
+
+# Create bar plot
+ggplot(summary_data, aes(x = as.factor(diabetes), y = avg_hypertension)) +
+  geom_col(fill = "purple") +
+  labs(title = "Average Hypertension Rate by Diabetes Status",
+       x = "Diabetes",
+       y = "Average Hypertension Rate") +
+  scale_x_discrete(labels = c("0" = "Non-Diabetic", "1" = "Diabetic")) +
+  theme_minimal()
+
+```
+
+```{r}
+cor.test(data_new$hbA1c_level , data_new$hypertension)
+```
+
+# SMOT Experiment
+# Note: SMOTE was explored as a class-balancing technique,
+# but the final Random Forest model below uses the cleaned original dataset.
+```{r}
+# Convert diabetes column to numeric directly (1 = Diabetic, 0 = Non-Diabetic)
+data_df <- as.data.frame(data_new)  # Convert to data.frame if it's a data.table
+data_df$diabetes <- ifelse(data_df$diabetes == "Diabetic", 1, 0)
+
+# Select numeric columns only (excluding the target)
+numeric_cols <- sapply(data_df, is.numeric)
+numeric_features <- data_df[, numeric_cols]
+numeric_features <- subset(numeric_features, select = -diabetes)  # Remove target from features
+
+# Apply SMOTE
+smote_output <- SMOTE(X = numeric_features, target = data_df$diabetes, K = 5)
+
+# Build final balanced dataset
+data_balanced <- smote_output$data
+data_balanced$diabetes <- factor(ifelse(data_balanced$class == 1, "Diabetic", "Non-Diabetic"))
+
+table(data_balanced$diabetes)
+```
+
+#Clustering
+```{r}
+#ordering smoking history
+data_df$smoking_history <- as.numeric(factor(data_df$smoking_history))
+#1- Current
+#2- Former
+#3- Never
+#4- No info
+```
+
+
+```{r}
+features <- data_df[, c("age", "bmi", "hbA1c_level", "blood_glucose_level", "smoking_history")]
+```
+
+
+```{r}
+#Standardize the features
+features_scaled <- scale(features)
+```
+
+
+```{r}
+#K means Clustering
+set.seed(42)  # For reproducibility
+kmeans_result <- kmeans(features_scaled, centers = 3)
+```
+
+
+```{r}
+data_df$cluster <- kmeans_result$cluster
+```
+
+
+```{r}
+ggplot(data_df, aes(x = age, y = bmi, color = factor(cluster))) +
+  geom_point(size = 3) +
+  labs(title = "Clusters of Diabetes Patients", x = "Age", y = "BMI")
+```
+
+
+```{r}
+# Determine optimal number of clusters using the Elbow method
+wss <- sapply(1:10, function(k) { kmeans(features_scaled, centers = k, nstart = 25)$tot.withinss })
+plot(1:10, wss, type = "b", pch = 19, frame = FALSE, xlab = "Number of Clusters (k)", ylab = "Total Within-Cluster Sum of Squares")
+ 
+# Apply K-means with chosen k (e.g., k = 3)
+set.seed(123)  # For reproducibility
+k <- 4  # Choose based on the elbow plot
+kmeans_result <- kmeans(features_scaled, centers = k, nstart = 25)
+ 
+# Add cluster labels to the original dataset
+data_df$cluster <- as.factor(kmeans_result$cluster)
+ 
+# Print cluster summary
+print(table(data_df$cluster))
+
+ 
+# Visualizing clustering results (if reducing dimensions)
+library(ggplot2)
+data_df$Cluster <- as.factor(kmeans_result$cluster)
+ggplot(data_df, aes(x = bmi, y = blood_glucose_level, color = Cluster)) +
+  geom_point(size = 3) + theme_minimal() +
+  labs(title = "K-means Clustering of Features", x = "BMI", y = "Blood Glucose Level")
+```
+
+
+# Machine Learning Pediction
+```{r}
+start_time <- Sys.time()
+
+# Split data
+index <- createDataPartition(data_new$diabetes, p = 0.8, list = FALSE)
+train_data <- data_new[index, ]
+test_data <- data_new[-index, ]
+
+rf_model <- randomForest(
+  diabetes ~ ., 
+  data = train_data,
+  ntree = 500,             
+  mtry = 4,
+  importance = TRUE,
+  nodesize = 5,
+  maxnodes = 30
+)
+
+# Predict
+rf_predictions <- predict(rf_model, newdata = test_data)
+
+
+```
+
+```{r}
+# Confusion matrix
+conf_matrix <- confusionMatrix(rf_predictions, test_data$diabetes)
+print(conf_matrix)
+
+# Extract values
+cm <- conf_matrix$table
+TP <- cm["Diabetic", "Diabetic"]
+FN <- cm["Non-Diabetic", "Diabetic"]
+FP <- cm["Diabetic", "Non-Diabetic"]
+TN <- cm["Non-Diabetic", "Non-Diabetic"]
+
+# Calculate recall and F1 score manually
+recall <- TP / (TP + FN)
+precision <- TP / (TP + FP)
+f1_score <- 2 * ((precision * recall) / (precision + recall))
+
+# Print them
+cat("Recall:", round(recall, 3), "\n")
+cat("F1 Score:", round(f1_score, 3), "\n")
+
+# ROC curve
+# For ROC, you need probabilities, not classes
+rf_probabilities <- predict(rf_model, newdata = test_data, type = "prob")
+
+# Plot ROC
+roc_obj <- roc(response = test_data$diabetes, predictor = rf_probabilities[, "Diabetic"])
+plot(roc_obj, main = "ROC Curve - Random Forest", col = "lightblue")
+auc_value <- auc(roc_obj)
+cat("AUC:", round(auc_value, 3), "\n")
+
+# End time
+end_time <- Sys.time()
+
+# Total time taken
+cat("Time taken:", round(difftime(end_time, start_time, units = "secs"), 2), "seconds\n")
+```
+
+#Importance Graph
+```{r}
+# Plot top important variables
+varImpPlot(rf_model,
+           type = 2,
+           main = "Feature Importance",
+           col = "blue",
+           cex.main = 1.2,
+           cex.axis = 0.8)
+
+importance(rf_model)
+
+```
+
+
+# SparkR Distributed Processing
+# This section explores distributed data processing with SparkR.
+# It applies rule-based classification thresholds rather than training
+# the Random Forest model used in the previous section.
+```{r}
+Sys.setenv(JAVA_HOME = "/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home")
+
+```
+
+```{r}
+
+Sys.setenv(SPARK_HOME = "/Users/ammarkhan/Desktop/spark-3.5.5-bin-hadoop3") 
+
+.libPaths(c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib"), .libPaths()))
+
+start_time <- Sys.time()
+
+# Load SparkR
+library(SparkR)
+
+# Start Spark session
+sparkR.session(master = "local[*]", appName = "DiabetesRiskClassification")
+```
+
+```{r}
+# Load your cleaned dataset into a Spark DataFrame
+df <- as.DataFrame(data_new)
+
+with_diabetes_prediction <- withColumn(
+  df,
+  "predicted_diabetes",
+  when(
+    df$hbA1c_level > 6.5 | df$blood_glucose_level > 140 | df$bmi > 30, "Diabetic"
+  ) %>%
+    otherwise("Non-Diabetic")
+)
+
+# Aggregate confusion matrix
+confusion_matrix <- summarize(
+  groupBy(with_diabetes_prediction, with_diabetes_prediction$diabetes, with_diabetes_prediction$predicted_diabetes),
+  count = n(with_diabetes_prediction$diabetes)
+)
+final_confusion <- collect(confusion_matrix)
+print(final_confusion)
+
+```
+
+```{r}
+# Pivot table: rows = actual, columns = predicted
+confusion_table <- final_confusion %>%
+  tidyr::pivot_wider(names_from = predicted_diabetes, values_from = count, values_fill = 0)
+
+# Assign values
+TP <- confusion_table$Diabetic[confusion_table$diabetes == "Diabetic"]
+FN <- confusion_table$`Non-Diabetic`[confusion_table$diabetes == "Diabetic"]
+FP <- confusion_table$Diabetic[confusion_table$diabetes == "Non-Diabetic"]
+TN <- confusion_table$`Non-Diabetic`[confusion_table$diabetes == "Non-Diabetic"]
+
+# Calculate metrics
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+recall <- TP / (TP + FN)
+precision <- TP / (TP + FP)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Print metrics
+cat("Accuracy:", round(accuracy, 3), "\n")
+cat("Recall:", round(recall, 3), "\n")
+cat("F1 Score:", round(f1_score, 3), "\n")
+
+# Optional: Visualise
+barplot(height = c(TP, FP, FN, TN),
+        names.arg = c("TP", "FP", "FN", "TN"),
+        col = c("violet", "red", "black", "blue"),
+        main = "Confusion Matrix Components",
+        ylab = "Count")
+
+# Stop Spark session
+sparkR.session.stop()
+
+# End time
+end_time <- Sys.time()
+
+# Total time taken
+cat("Time taken:", round(difftime(end_time, start_time, units = "secs"), 2), "seconds\n")
+
+```
+
+
+
